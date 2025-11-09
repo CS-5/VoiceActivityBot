@@ -1,6 +1,6 @@
 module github.com/CS-5/VoiceActivityBot
 
-go 1.24.9
+go 1.25
 
 require github.com/bwmarrin/discordgo v0.29.0
 

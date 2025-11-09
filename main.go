@@ -20,12 +20,11 @@ type Subscription struct {
 
 // Bot holds the bot state
 type Bot struct {
-	session       *discordgo.Session
-	subscriptions map[string][]Subscription // key: voiceChannelID
-	mu            sync.RWMutex
+	session          *discordgo.Session
+	subscriptions    map[string][]Subscription // key: voiceChannelID
+	mu               sync.RWMutex
+	registeredCmdIDs map[string][]*discordgo.ApplicationCommand // guildID -> commands
 }
-
-var bot *Bot
 
 func main() {
 	token := os.Getenv("DISCORD_TOKEN")
@@ -39,15 +38,22 @@ func main() {
 		log.Fatal("Error creating Discord session:", err)
 	}
 
-	bot = &Bot{
-		session:       dg,
-		subscriptions: make(map[string][]Subscription),
+	bot := &Bot{
+		session:          dg,
+		subscriptions:    make(map[string][]Subscription),
+		registeredCmdIDs: make(map[string][]*discordgo.ApplicationCommand),
 	}
 
-	// Register event handlers
-	dg.AddHandler(ready)
-	dg.AddHandler(voiceStateUpdate)
-	dg.AddHandler(interactionCreate)
+	// Register event handlers with bot context
+	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
+		bot.ready(s, r)
+	})
+	dg.AddHandler(func(s *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
+		bot.voiceStateUpdate(s, vsu)
+	})
+	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
+		bot.interactionCreate(s, i)
+	})
 
 	// Set intents - we need GuildVoiceStates and Guilds
 	dg.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildVoiceStates
@@ -65,18 +71,34 @@ func main() {
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, syscall.SIGINT, syscall.SIGTERM, os.Interrupt)
 	<-sc
+
+	// Cleanup: unregister commands
+	log.Println("Shutting down, cleaning up commands...")
+	bot.cleanup()
 }
 
-func ready(s *discordgo.Session, event *discordgo.Ready) {
+func (b *Bot) cleanup() {
+	// Unregister all commands from all guilds
+	for guildID, commands := range b.registeredCmdIDs {
+		for _, cmd := range commands {
+			err := b.session.ApplicationCommandDelete(b.session.State.User.ID, guildID, cmd.ID)
+			if err != nil {
+				log.Printf("Failed to delete command %v in guild %v: %v", cmd.Name, guildID, err)
+			}
+		}
+	}
+}
+
+func (b *Bot) ready(s *discordgo.Session, event *discordgo.Ready) {
 	log.Printf("Logged in as: %v#%v", s.State.User.Username, s.State.User.Discriminator)
 
 	// Register slash commands for each guild
 	for _, guild := range event.Guilds {
-		registerCommands(s, guild.ID)
+		b.registerCommands(s, guild.ID)
 	}
 }
 
-func registerCommands(s *discordgo.Session, guildID string) {
+func (b *Bot) registerCommands(s *discordgo.Session, guildID string) {
 	commands := []*discordgo.ApplicationCommand{
 		{
 			Name:        "subscribe",
@@ -96,25 +118,37 @@ func registerCommands(s *discordgo.Session, guildID string) {
 	}
 
 	for _, cmd := range commands {
-		_, err := s.ApplicationCommandCreate(s.State.User.ID, guildID, cmd)
+		registeredCmd, err := s.ApplicationCommandCreate(s.State.User.ID, guildID, cmd)
 		if err != nil {
 			log.Printf("Cannot create '%v' command in guild %v: %v", cmd.Name, guildID, err)
+		} else {
+			// Store registered command IDs for cleanup
+			b.mu.Lock()
+			b.registeredCmdIDs[guildID] = append(b.registeredCmdIDs[guildID], registeredCmd)
+			b.mu.Unlock()
 		}
 	}
 }
 
-func interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type == discordgo.InteractionApplicationCommand {
 		data := i.ApplicationCommandData()
 
 		switch data.Name {
 		case "subscribe":
-			handleSubscribe(s, i)
+			b.handleSubscribe(s, i)
+		}
+	} else if i.Type == discordgo.InteractionMessageComponent {
+		data := i.MessageComponentData()
+
+		switch data.CustomID {
+		case "subscribe_channel_select":
+			b.handleChannelSelect(s, i)
 		}
 	}
 }
 
-func handleSubscribe(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (b *Bot) handleSubscribe(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	options := i.ApplicationCommandData().Options
 
 	// Get the text channel where the command was issued
@@ -124,7 +158,7 @@ func handleSubscribe(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	// Check if a voice channel was provided
 	if len(options) == 0 {
 		// No voice channel provided - show selection dialog
-		handleSubscribeWithDialog(s, i)
+		b.handleSubscribeWithDialog(s, i)
 		return
 	}
 
@@ -132,14 +166,14 @@ func handleSubscribe(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	voiceChannelID := options[0].ChannelValue(s).ID
 
 	// Add subscription
-	bot.mu.Lock()
-	if bot.subscriptions[voiceChannelID] == nil {
-		bot.subscriptions[voiceChannelID] = []Subscription{}
+	b.mu.Lock()
+	if b.subscriptions[voiceChannelID] == nil {
+		b.subscriptions[voiceChannelID] = []Subscription{}
 	}
 
 	// Check if already subscribed
 	alreadySubscribed := false
-	for _, sub := range bot.subscriptions[voiceChannelID] {
+	for _, sub := range b.subscriptions[voiceChannelID] {
 		if sub.TextChannelID == textChannelID && sub.VoiceChannelID == voiceChannelID {
 			alreadySubscribed = true
 			break
@@ -147,13 +181,13 @@ func handleSubscribe(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	}
 
 	if !alreadySubscribed {
-		bot.subscriptions[voiceChannelID] = append(bot.subscriptions[voiceChannelID], Subscription{
+		b.subscriptions[voiceChannelID] = append(b.subscriptions[voiceChannelID], Subscription{
 			VoiceChannelID: voiceChannelID,
 			TextChannelID:  textChannelID,
 			GuildID:        guildID,
 		})
 	}
-	bot.mu.Unlock()
+	b.mu.Unlock()
 
 	// Get voice channel name
 	channel, err := s.Channel(voiceChannelID)
@@ -175,7 +209,7 @@ func handleSubscribe(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	})
 }
 
-func handleSubscribeWithDialog(s *discordgo.Session, i *discordgo.InteractionCreate) {
+func (b *Bot) handleSubscribeWithDialog(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	guildID := i.GuildID
 
 	// Get all voice channels in the guild
@@ -232,12 +266,73 @@ func handleSubscribeWithDialog(s *discordgo.Session, i *discordgo.InteractionCre
 			},
 		},
 	})
-
-	// Note: Handling the select menu response would require additional handler
-	// For now, users can use /subscribe <channel> directly
 }
 
-func voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
+func (b *Bot) handleChannelSelect(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.MessageComponentData()
+
+	// Get the selected voice channel ID
+	if len(data.Values) == 0 {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "❌ No channel selected",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	voiceChannelID := data.Values[0]
+	textChannelID := i.ChannelID
+	guildID := i.GuildID
+
+	// Add subscription
+	b.mu.Lock()
+	if b.subscriptions[voiceChannelID] == nil {
+		b.subscriptions[voiceChannelID] = []Subscription{}
+	}
+
+	// Check if already subscribed
+	alreadySubscribed := false
+	for _, sub := range b.subscriptions[voiceChannelID] {
+		if sub.TextChannelID == textChannelID && sub.VoiceChannelID == voiceChannelID {
+			alreadySubscribed = true
+			break
+		}
+	}
+
+	if !alreadySubscribed {
+		b.subscriptions[voiceChannelID] = append(b.subscriptions[voiceChannelID], Subscription{
+			VoiceChannelID: voiceChannelID,
+			TextChannelID:  textChannelID,
+			GuildID:        guildID,
+		})
+	}
+	b.mu.Unlock()
+
+	// Get voice channel name
+	channel, err := s.Channel(voiceChannelID)
+	channelName := voiceChannelID
+	if err == nil {
+		channelName = channel.Name
+	}
+
+	responseText := fmt.Sprintf("✅ Subscribed! This channel will receive notifications for voice activity in **%s**", channelName)
+	if alreadySubscribed {
+		responseText = fmt.Sprintf("ℹ️ Already subscribed to **%s**", channelName)
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:    responseText,
+			Components: []discordgo.MessageComponent{}, // Remove the select menu
+		},
+	})
+}
+
+func (b *Bot) voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
 	// Get the member info
 	member := vsu.Member
 	if member == nil {
@@ -307,20 +402,20 @@ func voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
 					oldChannelName = oldChannel.Name
 				}
 				oldMessage := fmt.Sprintf("🔇 **%s** left **%s**", username, oldChannelName)
-				sendNotifications(s, oldChannelID, oldMessage)
+				b.sendNotifications(s, oldChannelID, oldMessage)
 			}
 		}
 	}
 
 	if message != "" && channelID != "" {
-		sendNotifications(s, channelID, message)
+		b.sendNotifications(s, channelID, message)
 	}
 }
 
-func sendNotifications(s *discordgo.Session, voiceChannelID string, message string) {
-	bot.mu.RLock()
-	subscriptions := bot.subscriptions[voiceChannelID]
-	bot.mu.RUnlock()
+func (b *Bot) sendNotifications(s *discordgo.Session, voiceChannelID string, message string) {
+	b.mu.RLock()
+	subscriptions := b.subscriptions[voiceChannelID]
+	b.mu.RUnlock()
 
 	for _, sub := range subscriptions {
 		_, err := s.ChannelMessageSend(sub.TextChannelID, message)
