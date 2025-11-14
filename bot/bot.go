@@ -15,7 +15,7 @@ type (
 		session          *discordgo.Session
 		subscriptions    map[string][]subscription // key: voiceChannelID
 		mu               sync.RWMutex
-		registeredCmdIDs map[string][]*discordgo.ApplicationCommand // guildID -> commands
+		registeredCmdIds map[string][]*discordgo.ApplicationCommand // guildID -> commands
 		debounceInterval time.Duration
 		debouncers       map[string]*debouncer // key: userID:channelID
 		debounceMu       sync.RWMutex
@@ -54,12 +54,10 @@ func NewBot(token string) (*Bot, error) {
 	bot := &Bot{
 		session:          dg,
 		subscriptions:    make(map[string][]subscription),
-		registeredCmdIDs: make(map[string][]*discordgo.ApplicationCommand),
+		registeredCmdIds: make(map[string][]*discordgo.ApplicationCommand),
 		debounceInterval: debounceInterval,
 		debouncers:       make(map[string]*debouncer),
 	}
-
-	log.Printf("Debounce interval set to: %v", debounceInterval)
 
 	// Ready handler registers commands in the bot's guilds
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
@@ -69,10 +67,12 @@ func NewBot(token string) (*Bot, error) {
 		}
 	})
 
+	// Voice state update handler (Notified when user joins, leaves, or moves voice channels)
 	dg.AddHandler(func(s *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
 		bot.voiceStateUpdate(s, vsu)
 	})
 
+	// Interaction create handler (Handles slash commands and component interactions)
 	dg.AddHandler(func(s *discordgo.Session, i *discordgo.InteractionCreate) {
 		bot.interactionCreate(s, i)
 	})
@@ -86,11 +86,11 @@ func (b *Bot) Start() error {
 
 func (b *Bot) Stop() {
 	// Unregister all commands from all guilds
-	for guildID, commands := range b.registeredCmdIDs {
+	for guildId, commands := range b.registeredCmdIds {
 		for _, cmd := range commands {
-			err := b.session.ApplicationCommandDelete(b.session.State.User.ID, guildID, cmd.ID)
+			err := b.session.ApplicationCommandDelete(b.session.State.User.ID, guildId, cmd.ID)
 			if err != nil {
-				log.Printf("Failed to delete command %v in guild %v: %v", cmd.Name, guildID, err)
+				log.Printf("Failed to delete command %v in guild %v: %v", cmd.Name, guildId, err)
 			}
 		}
 	}
@@ -98,7 +98,7 @@ func (b *Bot) Stop() {
 	b.session.Close()
 }
 
-func (b *Bot) registerCommands(s *discordgo.Session, guildID string) {
+func (b *Bot) registerCommands(s *discordgo.Session, guildId string) {
 	commands := []*discordgo.ApplicationCommand{
 		{
 			Name:        "subscribe",
@@ -133,13 +133,13 @@ func (b *Bot) registerCommands(s *discordgo.Session, guildID string) {
 	}
 
 	for _, cmd := range commands {
-		registeredCmd, err := s.ApplicationCommandCreate(s.State.User.ID, guildID, cmd)
+		registeredCmd, err := s.ApplicationCommandCreate(s.State.User.ID, guildId, cmd)
 		if err != nil {
-			log.Printf("Cannot create '%v' command in guild %v: %v", cmd.Name, guildID, err)
+			log.Printf("Cannot create '%v' command in guild %v: %v", cmd.Name, guildId, err)
 		} else {
 			// Store registered command IDs for cleanup
 			b.mu.Lock()
-			b.registeredCmdIDs[guildID] = append(b.registeredCmdIDs[guildID], registeredCmd)
+			b.registeredCmdIds[guildId] = append(b.registeredCmdIds[guildId], registeredCmd)
 			b.mu.Unlock()
 		}
 	}
