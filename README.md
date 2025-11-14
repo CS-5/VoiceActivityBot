@@ -6,14 +6,15 @@ A Discord bot that monitors voice channels and notifies when server members join
 
 - 🔊 Monitor voice channel activity (joins/leaves)
 - 📢 Send notifications to subscribed text channels
-- ⚙️ Configurable via `/subscribe` command
+- ⚙️ Configurable via `/subscribe` and `/unsubscribe` commands
 - 🎯 Support for multiple subscriptions per voice channel
+- ⏱️ Debounced notifications to prevent spam from quick channel hopping
 
 ## Setup
 
 ### Prerequisites
 
-- Go 1.16 or higher
+- Go 1.25 or higher
 - A Discord Bot Token
 
 ### Installation
@@ -58,6 +59,15 @@ Or in one line:
 DISCORD_TOKEN="your-bot-token-here" ./VoiceActivityBot
 ```
 
+### Configuration
+
+Optional environment variables:
+
+- `DISCORD_TOKEN` (required): Your Discord bot token
+- `DEBOUNCE_INTERVAL` (optional): Time to wait before sending notifications (default: `3s`)
+  - Format: Go duration string (e.g., `5s`, `500ms`, `1m`)
+  - Example: `DEBOUNCE_INTERVAL=5s ./VoiceActivityBot`
+
 ## Usage
 
 ### Subscribe to Voice Channel Notifications
@@ -73,7 +83,23 @@ Use the `/subscribe` command in any text channel to start receiving notification
 ```
 /subscribe
 ```
-This will show a dialog to select a voice channel (the implementation shows a select menu).
+This will show a select menu to choose a voice channel.
+
+### Unsubscribe from Voice Channel Notifications
+
+Use the `/unsubscribe` command to stop receiving notifications:
+
+#### With a specific channel:
+```
+/unsubscribe voice-channel: <voice-channel-name>
+```
+
+#### Without arguments:
+```
+/unsubscribe
+```
+- If there's only one active subscription in the current text channel, it will automatically unsubscribe
+- If there are multiple subscriptions, a select menu will appear to choose which one to unsubscribe from
 
 ### How it works
 
@@ -83,6 +109,8 @@ This will show a dialog to select a voice channel (the implementation shows a se
    - Joins the monitored voice channel
    - Leaves the monitored voice channel
    - Moves to/from the monitored voice channel
+
+Notifications are debounced (3 seconds by default) to prevent spam when users quickly hop between channels.
 
 ### Example Notifications
 
@@ -95,6 +123,7 @@ This will show a dialog to select a voice channel (the implementation shows a se
 - Uses [discordgo](https://github.com/bwmarrin/discordgo) library
 - Stores subscriptions in-memory (resets on bot restart)
 - Supports multiple text channels subscribing to the same voice channel
+- Implements notification debouncing to reduce message spam
 
 ## License
 
