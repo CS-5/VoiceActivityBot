@@ -184,43 +184,9 @@ func (b *Bot) handleSubscribe(s *discordgo.Session, i *discordgo.InteractionCrea
 
 	// Voice channel was provided
 	voiceChannelID := options[0].ChannelValue(s).ID
+	alreadySubscribed := b.addSubscription(voiceChannelID, textChannelID, guildID)
 
-	// Add subscription
-	b.mu.Lock()
-	if b.subscriptions[voiceChannelID] == nil {
-		b.subscriptions[voiceChannelID] = []subscription{}
-	}
-
-	// Check if already subscribed
-	alreadySubscribed := false
-	for _, sub := range b.subscriptions[voiceChannelID] {
-		if sub.textChannelId == textChannelID && sub.voiceChannelId == voiceChannelID {
-			alreadySubscribed = true
-			break
-		}
-	}
-
-	if !alreadySubscribed {
-		b.subscriptions[voiceChannelID] = append(b.subscriptions[voiceChannelID], subscription{
-			voiceChannelId: voiceChannelID,
-			textChannelId:  textChannelID,
-			guildId:        guildID,
-		})
-	}
-	b.mu.Unlock()
-
-	// Get voice channel name
-	channel, err := s.Channel(voiceChannelID)
-	channelName := voiceChannelID
-	if err == nil {
-		channelName = channel.Name
-	}
-
-	responseText := fmt.Sprintf("✅ Subscribed! This channel will receive notifications for voice activity in **%s**", channelName)
-	if alreadySubscribed {
-		responseText = fmt.Sprintf("ℹ️ Already subscribed to **%s**", channelName)
-	}
-
+	responseText := b.formatSubscribeResponse(s, voiceChannelID, alreadySubscribed)
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
@@ -307,41 +273,8 @@ func (b *Bot) handleChannelSelect(s *discordgo.Session, i *discordgo.Interaction
 	textChannelID := i.ChannelID
 	guildID := i.GuildID
 
-	// Add subscription
-	b.mu.Lock()
-	if b.subscriptions[voiceChannelID] == nil {
-		b.subscriptions[voiceChannelID] = []subscription{}
-	}
-
-	// Check if already subscribed
-	alreadySubscribed := false
-	for _, sub := range b.subscriptions[voiceChannelID] {
-		if sub.textChannelId == textChannelID && sub.voiceChannelId == voiceChannelID {
-			alreadySubscribed = true
-			break
-		}
-	}
-
-	if !alreadySubscribed {
-		b.subscriptions[voiceChannelID] = append(b.subscriptions[voiceChannelID], subscription{
-			voiceChannelId: voiceChannelID,
-			textChannelId:  textChannelID,
-			guildId:        guildID,
-		})
-	}
-	b.mu.Unlock()
-
-	// Get voice channel name
-	channel, err := s.Channel(voiceChannelID)
-	channelName := voiceChannelID
-	if err == nil {
-		channelName = channel.Name
-	}
-
-	responseText := fmt.Sprintf("✅ Subscribed! This channel will receive notifications for voice activity in **%s**", channelName)
-	if alreadySubscribed {
-		responseText = fmt.Sprintf("ℹ️ Already subscribed to **%s**", channelName)
-	}
+	alreadySubscribed := b.addSubscription(voiceChannelID, textChannelID, guildID)
+	responseText := b.formatSubscribeResponse(s, voiceChannelID, alreadySubscribed)
 
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
@@ -366,37 +299,8 @@ func (b *Bot) handleUnsubscribe(s *discordgo.Session, i *discordgo.InteractionCr
 
 	// Voice channel was provided
 	voiceChannelID := options[0].ChannelValue(s).ID
-
-	// Remove subscription
-	b.mu.Lock()
-	removed := false
-	if subs, exists := b.subscriptions[voiceChannelID]; exists {
-		for idx, sub := range subs {
-			if sub.textChannelId == textChannelID && sub.voiceChannelId == voiceChannelID {
-				// Remove this subscription
-				b.subscriptions[voiceChannelID] = append(subs[:idx], subs[idx+1:]...)
-				removed = true
-				break
-			}
-		}
-		// Clean up empty subscription lists
-		if len(b.subscriptions[voiceChannelID]) == 0 {
-			delete(b.subscriptions, voiceChannelID)
-		}
-	}
-	b.mu.Unlock()
-
-	// Get voice channel name
-	channel, err := s.Channel(voiceChannelID)
-	channelName := voiceChannelID
-	if err == nil {
-		channelName = channel.Name
-	}
-
-	responseText := fmt.Sprintf("✅ Unsubscribed from **%s**", channelName)
-	if !removed {
-		responseText = fmt.Sprintf("ℹ️ Not subscribed to **%s**", channelName)
-	}
+	removed := b.removeSubscription(voiceChannelID, textChannelID)
+	responseText := b.formatUnsubscribeResponse(s, voiceChannelID, removed)
 
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -433,32 +337,13 @@ func (b *Bot) handleUnsubscribeWithoutChannel(s *discordgo.Session, i *discordgo
 	if len(matchingVoiceChannels) == 1 {
 		// Single subscription - unsubscribe automatically
 		voiceChannelID := matchingVoiceChannels[0]
-
-		b.mu.Lock()
-		if subs, exists := b.subscriptions[voiceChannelID]; exists {
-			for idx, sub := range subs {
-				if sub.textChannelId == textChannelID {
-					b.subscriptions[voiceChannelID] = append(subs[:idx], subs[idx+1:]...)
-					break
-				}
-			}
-			if len(b.subscriptions[voiceChannelID]) == 0 {
-				delete(b.subscriptions, voiceChannelID)
-			}
-		}
-		b.mu.Unlock()
-
-		// Get voice channel name
-		channel, err := s.Channel(voiceChannelID)
-		channelName := voiceChannelID
-		if err == nil {
-			channelName = channel.Name
-		}
+		b.removeSubscription(voiceChannelID, textChannelID)
+		responseText := b.formatUnsubscribeResponse(s, voiceChannelID, true)
 
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("✅ Unsubscribed from **%s**", channelName),
+				Content: responseText,
 			},
 		})
 		return
@@ -472,11 +357,7 @@ func (b *Bot) handleUnsubscribeWithDialog(s *discordgo.Session, i *discordgo.Int
 	// Create select menu options from voice channel IDs
 	var options []discordgo.SelectMenuOption
 	for _, channelID := range voiceChannelIDs {
-		channel, err := s.Channel(channelID)
-		channelName := channelID
-		if err == nil {
-			channelName = channel.Name
-		}
+		channelName := b.getChannelName(s, channelID)
 		options = append(options, discordgo.SelectMenuOption{
 			Label: channelName,
 			Value: channelID,
@@ -522,34 +403,8 @@ func (b *Bot) handleUnsubscribeChannelSelect(s *discordgo.Session, i *discordgo.
 	voiceChannelID := data.Values[0]
 	textChannelID := i.ChannelID
 
-	// Remove subscription
-	b.mu.Lock()
-	removed := false
-	if subs, exists := b.subscriptions[voiceChannelID]; exists {
-		for idx, sub := range subs {
-			if sub.textChannelId == textChannelID && sub.voiceChannelId == voiceChannelID {
-				b.subscriptions[voiceChannelID] = append(subs[:idx], subs[idx+1:]...)
-				removed = true
-				break
-			}
-		}
-		if len(b.subscriptions[voiceChannelID]) == 0 {
-			delete(b.subscriptions, voiceChannelID)
-		}
-	}
-	b.mu.Unlock()
-
-	// Get voice channel name
-	channel, err := s.Channel(voiceChannelID)
-	channelName := voiceChannelID
-	if err == nil {
-		channelName = channel.Name
-	}
-
-	responseText := fmt.Sprintf("✅ Unsubscribed from **%s**", channelName)
-	if !removed {
-		responseText = fmt.Sprintf("ℹ️ Not subscribed to **%s**", channelName)
-	}
+	removed := b.removeSubscription(voiceChannelID, textChannelID)
+	responseText := b.formatUnsubscribeResponse(s, voiceChannelID, removed)
 
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
@@ -558,6 +413,85 @@ func (b *Bot) handleUnsubscribeChannelSelect(s *discordgo.Session, i *discordgo.
 			Components: []discordgo.MessageComponent{}, // Remove the select menu
 		},
 	})
+}
+
+// addSubscription adds a subscription and returns whether it already existed
+func (b *Bot) addSubscription(voiceChannelID, textChannelID, guildID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if b.subscriptions[voiceChannelID] == nil {
+		b.subscriptions[voiceChannelID] = []subscription{}
+	}
+
+	// Check if already subscribed
+	for _, sub := range b.subscriptions[voiceChannelID] {
+		if sub.textChannelId == textChannelID && sub.voiceChannelId == voiceChannelID {
+			return true
+		}
+	}
+
+	// Add new subscription
+	b.subscriptions[voiceChannelID] = append(b.subscriptions[voiceChannelID], subscription{
+		voiceChannelId: voiceChannelID,
+		textChannelId:  textChannelID,
+		guildId:        guildID,
+	})
+	return false
+}
+
+// removeSubscription removes a subscription and returns whether it existed
+func (b *Bot) removeSubscription(voiceChannelID, textChannelID string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	subs, exists := b.subscriptions[voiceChannelID]
+	if !exists {
+		return false
+	}
+
+	for idx, sub := range subs {
+		if sub.textChannelId == textChannelID && sub.voiceChannelId == voiceChannelID {
+			// Remove this subscription
+			b.subscriptions[voiceChannelID] = append(subs[:idx], subs[idx+1:]...)
+
+			// Clean up empty subscription lists
+			if len(b.subscriptions[voiceChannelID]) == 0 {
+				delete(b.subscriptions, voiceChannelID)
+			}
+			return true
+		}
+	}
+	return false
+}
+
+// getChannelName fetches the channel name or returns the ID if fetching fails
+func (b *Bot) getChannelName(s *discordgo.Session, channelID string) string {
+	channel, err := s.Channel(channelID)
+	if err == nil {
+		return channel.Name
+	}
+	return channelID
+}
+
+// formatSubscribeResponse generates the response message for subscribe operations
+func (b *Bot) formatSubscribeResponse(s *discordgo.Session, voiceChannelID string, alreadySubscribed bool) string {
+	channelName := b.getChannelName(s, voiceChannelID)
+
+	if alreadySubscribed {
+		return fmt.Sprintf("ℹ️ Already subscribed to **%s**", channelName)
+	}
+	return fmt.Sprintf("✅ Subscribed! This channel will receive notifications for voice activity in **%s**", channelName)
+}
+
+// formatUnsubscribeResponse generates the response message for unsubscribe operations
+func (b *Bot) formatUnsubscribeResponse(s *discordgo.Session, voiceChannelID string, wasSubscribed bool) string {
+	channelName := b.getChannelName(s, voiceChannelID)
+
+	if !wasSubscribed {
+		return fmt.Sprintf("ℹ️ Not subscribed to **%s**", channelName)
+	}
+	return fmt.Sprintf("✅ Unsubscribed from **%s**", channelName)
 }
 
 func (b *Bot) voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
