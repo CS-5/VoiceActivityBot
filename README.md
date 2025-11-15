@@ -72,6 +72,9 @@ Optional environment variables:
 - `PERSISTENCE_FILE` (optional): Path to JSON file for storing subscriptions (default: `subscriptions.json`)
   - For Docker: Mount a volume to this path to persist data across container restarts
   - Example: `PERSISTENCE_FILE=/data/subscriptions.json ./VoiceActivityBot`
+- `ADMIN_CHANNELS` (optional): Pre-configure admin channels for guilds (format: `guildID:channelID,guildID:channelID`)
+  - Example: `ADMIN_CHANNELS=123456789:987654321,111222333:444555666`
+  - Admin channels can also be set using the `/set-admin-channel` command
 
 ## Usage
 
@@ -120,7 +123,13 @@ Run this command in the channel you want to designate as the admin channel. Requ
 ```
 /list-subscriptions
 ```
-This command can only be used in the designated admin channel. It displays all active voice channel subscriptions across the server, showing which text channels are subscribed to which voice channels.
+This command can only be used in the designated admin channel. It displays a rich interactive embed showing all active voice channel subscriptions across the server. Features:
+- View all subscriptions organized by voice channel
+- Click buttons to quickly remove individual subscriptions
+- Beautiful embed formatting with Discord's native design
+- Shows which text channels receive notifications for each voice channel
+
+**Note:** The `/list-subscriptions` command only appears in the admin channel for cleaner command lists in other channels.
 
 ### How it works
 

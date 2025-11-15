@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -73,6 +74,9 @@ func NewBot(token string) (*Bot, error) {
 	if err := bot.loadPersistedData(); err != nil {
 		log.Printf("Warning: Failed to load persisted data: %v", err)
 	}
+
+	// Load admin channels from environment variable
+	bot.loadAdminChannelsFromEnv()
 
 	// Ready handler registers commands in the bot's guilds
 	dg.AddHandler(func(s *discordgo.Session, r *discordgo.Ready) {
@@ -191,11 +195,15 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 	case discordgo.InteractionMessageComponent:
 		data := i.MessageComponentData()
 
-		switch data.CustomID {
-		case "subscribe_channel_select":
-			b.handleChannelSelect(s, i)
-		case "unsubscribe_channel_select":
-			b.handleUnsubscribeChannelSelect(s, i)
+		if strings.HasPrefix(data.CustomID, "remove_sub:") {
+			b.handleRemoveSubscriptionButton(s, i)
+		} else {
+			switch data.CustomID {
+			case "subscribe_channel_select":
+				b.handleChannelSelect(s, i)
+			case "unsubscribe_channel_select":
+				b.handleUnsubscribeChannelSelect(s, i)
+			}
 		}
 	}
 }
@@ -481,10 +489,8 @@ func (b *Bot) handleSetAdminChannel(s *discordgo.Session, i *discordgo.Interacti
 	b.adminChannels[guildID] = channelID
 	b.mu.Unlock()
 
-	// Save to persistence
-	if err := b.savePersistedData(); err != nil {
-		log.Printf("Error saving admin channel: %v", err)
-	}
+	// Save to persistence asynchronously (non-blocking)
+	b.savePersistedDataAsync()
 
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
@@ -539,8 +545,10 @@ func (b *Bot) handleListSubscriptions(s *discordgo.Session, i *discordgo.Interac
 		return
 	}
 
-	var message string
-	message = "**📋 Active Subscriptions**\n\n"
+	// Build embed fields
+	var fields []*discordgo.MessageEmbedField
+	var components []discordgo.MessageComponent
+	var buttons []discordgo.MessageComponent
 
 	count := 0
 	for voiceChannelID, subs := range b.subscriptions {
@@ -557,27 +565,133 @@ func (b *Bot) handleListSubscriptions(s *discordgo.Session, i *discordgo.Interac
 		}
 
 		voiceChannelName := b.getChannelName(s, voiceChannelID)
-		message += fmt.Sprintf("**🔊 %s** (<#%s>)\n", voiceChannelName, voiceChannelID)
-
+		var notifyChannels string
 		for _, sub := range guildSubs {
-			message += fmt.Sprintf("  → Notifies: <#%s>\n", sub.TextChannelId)
+			notifyChannels += fmt.Sprintf("<#%s>\n", sub.TextChannelId)
 			count++
+
+			// Add a button for each subscription (limit to 25 total buttons across 5 action rows)
+			if len(buttons) < 25 {
+				buttonLabel := fmt.Sprintf("Remove: %s", voiceChannelName)
+				if len(buttonLabel) > 80 {
+					buttonLabel = buttonLabel[:77] + "..."
+				}
+
+				button := discordgo.Button{
+					Label:    buttonLabel,
+					Style:    discordgo.DangerButton,
+					CustomID: fmt.Sprintf("remove_sub:%s:%s", voiceChannelID, sub.TextChannelId),
+				}
+				buttons = append(buttons, button)
+			}
 		}
-		message += "\n"
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   fmt.Sprintf("🔊 %s", voiceChannelName),
+			Value:  notifyChannels,
+			Inline: false,
+		})
 	}
 
 	if count == 0 {
-		message = "ℹ️ No active subscriptions in this server"
-	} else {
-		message += fmt.Sprintf("*Total: %d subscription(s)*", count)
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "ℹ️ No active subscriptions in this server",
+			},
+		})
+		return
+	}
+
+	// Organize buttons into action rows (max 5 buttons per row, max 5 rows)
+	for i := 0; i < len(buttons); i += 5 {
+		end := i + 5
+		if end > len(buttons) {
+			end = len(buttons)
+		}
+		components = append(components, discordgo.ActionsRow{
+			Components: buttons[i:end],
+		})
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "📋 Active Voice Channel Subscriptions",
+		Description: fmt.Sprintf("Total: **%d** subscription(s)\n\nClick a button below to remove a subscription.", count),
+		Color:       0x5865F2, // Discord Blurple
+		Fields:      fields,
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: "Use /subscribe and /unsubscribe commands to manage subscriptions",
+		},
 	}
 
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
-			Content: message,
+			Embeds:     []*discordgo.MessageEmbed{embed},
+			Components: components,
 		},
 	})
+}
+
+func (b *Bot) handleRemoveSubscriptionButton(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.MessageComponentData()
+	guildID := i.GuildID
+
+	// Parse the custom ID: "remove_sub:voiceChannelID:textChannelID"
+	parts := strings.Split(data.CustomID, ":")
+	if len(parts) != 3 {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "❌ Invalid button data",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	voiceChannelID := parts[1]
+	textChannelID := parts[2]
+
+	// Verify this is in the admin channel
+	b.mu.RLock()
+	adminChannelID, hasAdminChannel := b.adminChannels[guildID]
+	b.mu.RUnlock()
+
+	if !hasAdminChannel || i.ChannelID != adminChannelID {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: "❌ This action can only be performed in the admin channel",
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+		return
+	}
+
+	// Remove the subscription
+	removed := b.removeSubscription(voiceChannelID, textChannelID)
+
+	voiceChannelName := b.getChannelName(s, voiceChannelID)
+
+	if removed {
+		// Update the message to refresh the list
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("✅ Removed subscription: **%s** → <#%s>", voiceChannelName, textChannelID),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+	} else {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("ℹ️ Subscription not found: **%s** → <#%s>", voiceChannelName, textChannelID),
+				Flags:   discordgo.MessageFlagsEphemeral,
+			},
+		})
+	}
 }
 
 // loadPersistedData loads subscriptions and admin channels from disk
@@ -589,11 +703,43 @@ func (b *Bot) loadPersistedData() error {
 
 	b.mu.Lock()
 	b.subscriptions = data.Subscriptions
-	b.adminChannels = data.AdminChannels
+	// Only load admin channels from disk if not set via environment
+	if len(b.adminChannels) == 0 {
+		b.adminChannels = data.AdminChannels
+	}
 	b.mu.Unlock()
 
-	log.Printf("Loaded %d voice channel subscriptions and %d admin channels", len(data.Subscriptions), len(data.AdminChannels))
+	log.Printf("Loaded %d voice channel subscriptions and %d admin channels", len(data.Subscriptions), len(b.adminChannels))
 	return nil
+}
+
+// loadAdminChannelsFromEnv loads admin channels from ADMIN_CHANNELS environment variable
+// Format: ADMIN_CHANNELS=guildID:channelID,guildID:channelID
+func (b *Bot) loadAdminChannelsFromEnv() {
+	envAdminChannels := os.Getenv("ADMIN_CHANNELS")
+	if envAdminChannels == "" {
+		return
+	}
+
+	pairs := strings.Split(envAdminChannels, ",")
+	count := 0
+	for _, pair := range pairs {
+		parts := strings.Split(strings.TrimSpace(pair), ":")
+		if len(parts) == 2 {
+			guildID := strings.TrimSpace(parts[0])
+			channelID := strings.TrimSpace(parts[1])
+			if guildID != "" && channelID != "" {
+				b.mu.Lock()
+				b.adminChannels[guildID] = channelID
+				b.mu.Unlock()
+				count++
+			}
+		}
+	}
+
+	if count > 0 {
+		log.Printf("Loaded %d admin channels from ADMIN_CHANNELS environment variable", count)
+	}
 }
 
 // savePersistedData saves subscriptions and admin channels to disk
@@ -606,6 +752,15 @@ func (b *Bot) savePersistedData() error {
 	b.mu.RUnlock()
 
 	return b.persistence.Save(data)
+}
+
+// savePersistedDataAsync saves subscriptions and admin channels to disk asynchronously
+func (b *Bot) savePersistedDataAsync() {
+	go func() {
+		if err := b.savePersistedData(); err != nil {
+			log.Printf("Error saving persisted data: %v", err)
+		}
+	}()
 }
 
 // addSubscription adds a subscription and returns whether it already existed
@@ -630,13 +785,10 @@ func (b *Bot) addSubscription(voiceChannelID, textChannelID, guildID string) boo
 		TextChannelId:  textChannelID,
 		GuildId:        guildID,
 	})
-
-	// Save to persistence (unlock first to avoid deadlock)
 	b.mu.Unlock()
-	if err := b.savePersistedData(); err != nil {
-		log.Printf("Error saving subscription: %v", err)
-	}
-	b.mu.Lock()
+
+	// Save to persistence asynchronously (non-blocking)
+	b.savePersistedDataAsync()
 
 	return false
 }
@@ -661,11 +813,9 @@ func (b *Bot) removeSubscription(voiceChannelID, textChannelID string) bool {
 				delete(b.subscriptions, voiceChannelID)
 			}
 
-			// Save to persistence (unlock first to avoid deadlock)
+			// Save to persistence asynchronously (non-blocking)
 			b.mu.Unlock()
-			if err := b.savePersistedData(); err != nil {
-				log.Printf("Error saving after removing subscription: %v", err)
-			}
+			b.savePersistedDataAsync()
 			b.mu.Lock()
 
 			return true
