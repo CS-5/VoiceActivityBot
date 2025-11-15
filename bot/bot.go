@@ -231,6 +231,7 @@ func (b *Bot) handleSubscribe(s *discordgo.Session, i *discordgo.InteractionCrea
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Content: responseText,
+			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	})
 }
@@ -346,6 +347,7 @@ func (b *Bot) handleUnsubscribe(s *discordgo.Session, i *discordgo.InteractionCr
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Content: responseText,
+			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	})
 }
@@ -369,6 +371,7 @@ func (b *Bot) handleUnsubscribeWithoutChannel(s *discordgo.Session, i *discordgo
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
 				Content: "ℹ️ No active subscriptions in this channel",
+				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
 		return
@@ -384,6 +387,7 @@ func (b *Bot) handleUnsubscribeWithoutChannel(s *discordgo.Session, i *discordgo
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
 				Content: responseText,
+				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})
 		return
@@ -496,6 +500,7 @@ func (b *Bot) handleSetAdminChannel(s *discordgo.Session, i *discordgo.Interacti
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{
 			Content: "✅ This channel has been set as the admin channel for managing subscriptions",
+			Flags:   discordgo.MessageFlagsEphemeral,
 		},
 	})
 }
