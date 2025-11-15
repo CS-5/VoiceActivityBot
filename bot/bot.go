@@ -31,11 +31,9 @@ type (
 	}
 
 	debouncer struct {
-		timer            *time.Timer
-		message          string
-		mu               sync.Mutex
-		notificationSent bool        // Track if notification was actually sent
-		cleanupTimer     *time.Timer // Timer to clean up stale debouncers
+		timer   *time.Timer
+		message string
+		mu      sync.Mutex
 	}
 )
 
@@ -88,7 +86,7 @@ func NewBot(token string) (*Bot, error) {
 		}
 	})
 
-	// Voice state update handler (Notified when user joins, leaves, or moves voice channels)
+	// Voice state update handler (Notified when user joins or moves voice channels)
 	dg.AddHandler(func(s *discordgo.Session, vsu *discordgo.VoiceStateUpdate) {
 		bot.voiceStateUpdate(s, vsu)
 	})
@@ -1072,62 +1070,39 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUp
 		username = member.Nick
 	}
 
-	// Check if user joined or left a voice channel
+	// Detect when user joins a voice channel
+	var joinedChannelID string
+
 	if vsu.BeforeUpdate == nil {
 		// User joined a voice channel (no previous state)
 		if vsu.ChannelID != "" {
-			channelID := vsu.ChannelID
-			channel, err := s.Channel(channelID)
-			channelName := channelID
-			if err == nil {
-				channelName = channel.Name
-			}
-			message := fmt.Sprintf("🔊 **%s** joined **%s**", username, channelName)
-			b.debounceNotification(s, vsu.UserID, channelID, message)
+			joinedChannelID = vsu.ChannelID
 		}
 	} else {
 		// User was already in a voice channel
 		oldChannelID := vsu.BeforeUpdate.ChannelID
 		newChannelID := vsu.ChannelID
 
-		if oldChannelID != "" && newChannelID == "" {
-			// User left voice channel
-			channelID := oldChannelID
-			channel, err := s.Channel(channelID)
-			channelName := channelID
-			if err == nil {
-				channelName = channel.Name
-			}
-			message := fmt.Sprintf("🔇 **%s** left **%s**", username, channelName)
-			b.debounceNotification(s, vsu.UserID, channelID, message)
-		} else if oldChannelID != newChannelID && newChannelID != "" {
-			// User moved to a different channel
-			// Notify old channel about leaving
-			if oldChannelID != "" {
-				oldChannel, err := s.Channel(oldChannelID)
-				oldChannelName := oldChannelID
-				if err == nil {
-					oldChannelName = oldChannel.Name
-				}
-				oldMessage := fmt.Sprintf("🔇 **%s** left **%s**", username, oldChannelName)
-				b.debounceNotification(s, vsu.UserID, oldChannelID, oldMessage)
-			}
-
-			// Notify new channel about joining
-			channel, err := s.Channel(newChannelID)
-			channelName := newChannelID
-			if err == nil {
-				channelName = channel.Name
-			}
-			message := fmt.Sprintf("🔊 **%s** joined **%s**", username, channelName)
-			b.debounceNotification(s, vsu.UserID, newChannelID, message)
+		// Only notify if user moved to a different channel (ignore leaves)
+		if oldChannelID != newChannelID && newChannelID != "" {
+			joinedChannelID = newChannelID
 		}
+	}
+
+	// Send join notification if applicable
+	if joinedChannelID != "" {
+		channel, err := s.Channel(joinedChannelID)
+		channelName := joinedChannelID
+		if err == nil {
+			channelName = channel.Name
+		}
+		message := fmt.Sprintf("🔊 **%s** joined **%s**", username, channelName)
+		b.debounceNotification(s, vsu.UserID, joinedChannelID, message)
 	}
 }
 
 func (b *Bot) debounceNotification(s *discordgo.Session, userID, channelID, message string) {
 	key := fmt.Sprintf("%s:%s", userID, channelID)
-	isLeaveMessage := strings.HasPrefix(message, "🔇")
 
 	b.debounceMu.Lock()
 	deb, exists := b.debouncers[key]
@@ -1140,64 +1115,27 @@ func (b *Bot) debounceNotification(s *discordgo.Session, userID, channelID, mess
 	deb.mu.Lock()
 	defer deb.mu.Unlock()
 
-	// If this is a leave message but the join notification was never sent,
-	// cancel the pending timer and don't send any notification
-	if isLeaveMessage && deb.timer != nil && !deb.notificationSent {
-		deb.timer.Stop()
-		if deb.cleanupTimer != nil {
-			deb.cleanupTimer.Stop()
-		}
-		// Clean up the debouncer
-		b.debounceMu.Lock()
-		delete(b.debouncers, key)
-		b.debounceMu.Unlock()
-		return
-	}
-
-	// If this is a leave message and a join notification was sent,
-	// send the leave message immediately
-	if isLeaveMessage && deb.notificationSent {
-		if deb.cleanupTimer != nil {
-			deb.cleanupTimer.Stop()
-		}
-		b.sendNotifications(s, channelID, message)
-		// Clean up the debouncer
-		b.debounceMu.Lock()
-		delete(b.debouncers, key)
-		b.debounceMu.Unlock()
-		return
-	}
-
-	// For join messages (or first message), update the message
+	// Update the message (in case user quickly switches channels)
 	deb.message = message
 
-	// If there's an existing timer, stop it
+	// If there's an existing timer, stop it and restart
 	if deb.timer != nil {
 		deb.timer.Stop()
 	}
-	if deb.cleanupTimer != nil {
-		deb.cleanupTimer.Stop()
-	}
 
-	// Create a new timer for join messages
+	// Create a timer to send the join notification after the debounce interval
 	deb.timer = time.AfterFunc(b.debounceInterval, func() {
 		deb.mu.Lock()
 		finalMessage := deb.message
-		deb.notificationSent = true
 		deb.mu.Unlock()
 
 		// Send the notification
 		b.sendNotifications(s, channelID, finalMessage)
 
-		// Set a cleanup timer to remove stale debouncer entries
-		// if no leave message is received within a reasonable time (e.g., 1 hour)
-		deb.mu.Lock()
-		deb.cleanupTimer = time.AfterFunc(1*time.Hour, func() {
-			b.debounceMu.Lock()
-			delete(b.debouncers, key)
-			b.debounceMu.Unlock()
-		})
-		deb.mu.Unlock()
+		// Clean up the debouncer after sending
+		b.debounceMu.Lock()
+		delete(b.debouncers, key)
+		b.debounceMu.Unlock()
 	})
 }
 
