@@ -31,9 +31,11 @@ type (
 	}
 
 	debouncer struct {
-		timer   *time.Timer
-		message string
-		mu      sync.Mutex
+		timer            *time.Timer
+		message          string
+		mu               sync.Mutex
+		notificationSent bool        // Track if notification was actually sent
+		cleanupTimer     *time.Timer // Timer to clean up stale debouncers
 	}
 )
 
@@ -1125,6 +1127,7 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUp
 
 func (b *Bot) debounceNotification(s *discordgo.Session, userID, channelID, message string) {
 	key := fmt.Sprintf("%s:%s", userID, channelID)
+	isLeaveMessage := strings.HasPrefix(message, "🔇")
 
 	b.debounceMu.Lock()
 	deb, exists := b.debouncers[key]
@@ -1137,27 +1140,64 @@ func (b *Bot) debounceNotification(s *discordgo.Session, userID, channelID, mess
 	deb.mu.Lock()
 	defer deb.mu.Unlock()
 
-	// Update the message
+	// If this is a leave message but the join notification was never sent,
+	// cancel the pending timer and don't send any notification
+	if isLeaveMessage && deb.timer != nil && !deb.notificationSent {
+		deb.timer.Stop()
+		if deb.cleanupTimer != nil {
+			deb.cleanupTimer.Stop()
+		}
+		// Clean up the debouncer
+		b.debounceMu.Lock()
+		delete(b.debouncers, key)
+		b.debounceMu.Unlock()
+		return
+	}
+
+	// If this is a leave message and a join notification was sent,
+	// send the leave message immediately
+	if isLeaveMessage && deb.notificationSent {
+		if deb.cleanupTimer != nil {
+			deb.cleanupTimer.Stop()
+		}
+		b.sendNotifications(s, channelID, message)
+		// Clean up the debouncer
+		b.debounceMu.Lock()
+		delete(b.debouncers, key)
+		b.debounceMu.Unlock()
+		return
+	}
+
+	// For join messages (or first message), update the message
 	deb.message = message
 
 	// If there's an existing timer, stop it
 	if deb.timer != nil {
 		deb.timer.Stop()
 	}
+	if deb.cleanupTimer != nil {
+		deb.cleanupTimer.Stop()
+	}
 
-	// Create a new timer
+	// Create a new timer for join messages
 	deb.timer = time.AfterFunc(b.debounceInterval, func() {
 		deb.mu.Lock()
 		finalMessage := deb.message
+		deb.notificationSent = true
 		deb.mu.Unlock()
 
 		// Send the notification
 		b.sendNotifications(s, channelID, finalMessage)
 
-		// Clean up the debouncer
-		b.debounceMu.Lock()
-		delete(b.debouncers, key)
-		b.debounceMu.Unlock()
+		// Set a cleanup timer to remove stale debouncer entries
+		// if no leave message is received within a reasonable time (e.g., 1 hour)
+		deb.mu.Lock()
+		deb.cleanupTimer = time.AfterFunc(1*time.Hour, func() {
+			b.debounceMu.Lock()
+			delete(b.debouncers, key)
+			b.debounceMu.Unlock()
+		})
+		deb.mu.Unlock()
 	})
 }
 
