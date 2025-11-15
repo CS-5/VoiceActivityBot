@@ -1,0 +1,28 @@
+services:
+  voiceactivitybot:
+    # image: todo vab:latest
+    restart: unless-stopped
+    
+    environment:
+      # Required: Your Discord bot token
+      - DISCORD_TOKEN=my-token
+
+      # Persistence file path
+      - PERSISTENCE_FILE=/data/subscriptions.json
+      
+      # Optional: Debounce interval (default: 3s)
+      # - DEBOUNCE_INTERVAL=${DEBOUNCE_INTERVAL:-3s}
+      
+      # Optional: Pre-configure admin channels
+      # Format: guildID:channelID,guildID:channelID
+      # - ADMIN_CHANNELS=<guildId>:<channelId>
+    
+    volumes:
+      - ./data:/data
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    
+    # Read-only root filesystem (data volume is writable)
+    read_only: true
