@@ -903,13 +903,9 @@ func (b *Bot) loadPersistedData() error {
 
 	b.mu.Lock()
 	b.subscriptions = data.Subscriptions
-	// Only load admin channels from disk if not set via environment
-	if len(b.adminChannels) == 0 {
-		b.adminChannels = data.AdminChannels
-	}
 	b.mu.Unlock()
 
-	log.Printf("Loaded %d voice channel subscriptions and %d admin channels", len(data.Subscriptions), len(b.adminChannels))
+	log.Printf("Loaded %d voice channel subscriptions", len(data.Subscriptions))
 	return nil
 }
 
@@ -947,7 +943,6 @@ func (b *Bot) savePersistedData() error {
 	b.mu.RLock()
 	data := &PersistentData{
 		Subscriptions: b.subscriptions,
-		AdminChannels: b.adminChannels,
 	}
 	b.mu.RUnlock()
 
@@ -985,7 +980,6 @@ func (b *Bot) addSubscription(voiceChannelID, textChannelID, guildID string) boo
 		TextChannelId:  textChannelID,
 		GuildId:        guildID,
 	})
-	b.mu.Unlock()
 
 	// Save to persistence asynchronously (non-blocking)
 	b.savePersistedDataAsync()

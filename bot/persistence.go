@@ -11,7 +11,6 @@ type (
 	// PersistentData represents the data structure to be saved to disk
 	PersistentData struct {
 		Subscriptions map[string][]subscription `json:"subscriptions"`
-		AdminChannels map[string]string         `json:"admin_channels"` // guildID -> channelID
 	}
 
 	// Persistence handles reading and writing bot state to disk
@@ -38,7 +37,6 @@ func (p *Persistence) Load() (*PersistentData, error) {
 
 	data := &PersistentData{
 		Subscriptions: make(map[string][]subscription),
-		AdminChannels: make(map[string]string),
 	}
 
 	file, err := os.ReadFile(p.filePath)
