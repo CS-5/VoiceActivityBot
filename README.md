@@ -9,6 +9,8 @@ A Discord bot that monitors voice channels and notifies when server members join
 - ⚙️ Configurable via `/subscribe` and `/unsubscribe` commands
 - 🎯 Support for multiple subscriptions per voice channel
 - ⏱️ Debounced notifications to prevent spam from quick channel hopping
+- 💾 Persistent subscriptions across restarts (JSON file storage)
+- 👑 Admin channel management for viewing and managing all subscriptions
 
 ## Setup
 
@@ -67,6 +69,9 @@ Optional environment variables:
 - `DEBOUNCE_INTERVAL` (optional): Time to wait before sending notifications (default: `3s`)
   - Format: Go duration string (e.g., `5s`, `500ms`, `1m`)
   - Example: `DEBOUNCE_INTERVAL=5s ./VoiceActivityBot`
+- `PERSISTENCE_FILE` (optional): Path to JSON file for storing subscriptions (default: `subscriptions.json`)
+  - For Docker: Mount a volume to this path to persist data across container restarts
+  - Example: `PERSISTENCE_FILE=/data/subscriptions.json ./VoiceActivityBot`
 
 ## Usage
 
@@ -101,6 +106,22 @@ Use the `/unsubscribe` command to stop receiving notifications:
 - If there's only one active subscription in the current text channel, it will automatically unsubscribe
 - If there are multiple subscriptions, a select menu will appear to choose which one to unsubscribe from
 
+### Admin Channel Management
+
+Server administrators can set up an admin channel for centralized subscription management:
+
+#### Set Admin Channel:
+```
+/set-admin-channel
+```
+Run this command in the channel you want to designate as the admin channel. Requires Administrator permission.
+
+#### List All Subscriptions:
+```
+/list-subscriptions
+```
+This command can only be used in the designated admin channel. It displays all active voice channel subscriptions across the server, showing which text channels are subscribed to which voice channels.
+
 ### How it works
 
 1. Run `/subscribe` in a text channel
@@ -112,18 +133,36 @@ Use the `/unsubscribe` command to stop receiving notifications:
 
 Notifications are debounced (3 seconds by default) to prevent spam when users quickly hop between channels.
 
+All subscriptions are automatically saved to a JSON file and restored when the bot restarts.
+
 ### Example Notifications
 
 - 🔊 **Username** joined **General Voice**
 - 🔇 **Username** left **General Voice**
 
+## Docker Usage
+
+The bot is designed to work well in Docker containers:
+
+```bash
+docker run -d \
+  -e DISCORD_TOKEN="your-bot-token" \
+  -e DEBOUNCE_INTERVAL="3s" \
+  -v /path/on/host:/data \
+  -e PERSISTENCE_FILE="/data/subscriptions.json" \
+  your-bot-image
+```
+
+This mounts a volume to persist subscriptions across container restarts.
+
 ## Technical Details
 
 - Written in Go
 - Uses [discordgo](https://github.com/bwmarrin/discordgo) library
-- Stores subscriptions in-memory (resets on bot restart)
+- Persistent storage using JSON files (Docker-friendly)
 - Supports multiple text channels subscribing to the same voice channel
 - Implements notification debouncing to reduce message spam
+- Thread-safe operations with proper mutex locking
 
 ## License
 

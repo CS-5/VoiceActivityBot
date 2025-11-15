@@ -21,3 +21,6 @@ bin/
 # Environment variables
 .env
 *.env
+
+# Persistence files
+subscriptions.json
