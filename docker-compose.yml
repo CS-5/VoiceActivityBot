@@ -1,27 +1,23 @@
-version: '3.8'
-
 services:
   voiceactivitybot:
-    build: .
-    container_name: voiceactivitybot
+    # image: todo vab:latest
     restart: unless-stopped
     
     environment:
       # Required: Your Discord bot token
-      - DISCORD_TOKEN=${DISCORD_TOKEN}
+      - DISCORD_TOKEN=my-token
+
+      # Persistence file path
+      - PERSISTENCE_FILE=/data/subscriptions.json
       
       # Optional: Debounce interval (default: 3s)
-      - DEBOUNCE_INTERVAL=${DEBOUNCE_INTERVAL:-3s}
-      
-      # Optional: Persistence file path
-      - PERSISTENCE_FILE=/data/subscriptions.json
+      # - DEBOUNCE_INTERVAL=${DEBOUNCE_INTERVAL:-3s}
       
       # Optional: Pre-configure admin channels
       # Format: guildID:channelID,guildID:channelID
-      # - ADMIN_CHANNELS=123456789:987654321,111222333:444555666
+      # - ADMIN_CHANNELS=<guildId>:<channelId>
     
     volumes:
-      # Mount volume for persistent data
       - ./data:/data
     
     # Security options
@@ -30,13 +26,3 @@ services:
     
     # Read-only root filesystem (data volume is writable)
     read_only: true
-    
-    # Resource limits (adjust as needed)
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 128M
-        reservations:
-          cpus: '0.1'
-          memory: 32M
