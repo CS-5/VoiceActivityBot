@@ -155,10 +155,6 @@ func (b *Bot) registerCommands(s *discordgo.Session, guildId string) {
 			},
 		},
 		{
-			Name:        "set-admin-channel",
-			Description: "Set this channel as the admin channel for managing subscriptions",
-		},
-		{
 			Name:        "list-subscriptions",
 			Description: "List all voice channel subscriptions (admin channel only)",
 		},
@@ -187,8 +183,6 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 			b.handleSubscribe(s, i)
 		case "unsubscribe":
 			b.handleUnsubscribe(s, i)
-		case "set-admin-channel":
-			b.handleSetAdminChannel(s, i)
 		case "list-subscriptions":
 			b.handleListSubscriptions(s, i)
 		}
@@ -463,52 +457,6 @@ func (b *Bot) handleUnsubscribeChannelSelect(s *discordgo.Session, i *discordgo.
 	})
 }
 
-func (b *Bot) handleSetAdminChannel(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	guildID := i.GuildID
-	channelID := i.ChannelID
-
-	// Check if user has administrator permission
-	member := i.Member
-	if member == nil {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "❌ Error: Could not verify permissions",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
-		return
-	}
-
-	hasAdmin := (member.Permissions & discordgo.PermissionAdministrator) != 0
-
-	if !hasAdmin {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "❌ You need Administrator permission to set the admin channel",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
-		return
-	}
-
-	b.mu.Lock()
-	b.adminChannels[guildID] = channelID
-	b.mu.Unlock()
-
-	// Save to persistence asynchronously (non-blocking)
-	b.savePersistedDataAsync()
-
-	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{
-			Content: "✅ This channel has been set as the admin channel for managing subscriptions",
-			Flags:   discordgo.MessageFlagsEphemeral,
-		},
-	})
-}
-
 func (b *Bot) handleListSubscriptions(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	guildID := i.GuildID
 	channelID := i.ChannelID
@@ -522,7 +470,7 @@ func (b *Bot) handleListSubscriptions(s *discordgo.Session, i *discordgo.Interac
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 			Type: discordgo.InteractionResponseChannelMessageWithSource,
 			Data: &discordgo.InteractionResponseData{
-				Content: "❌ No admin channel has been set for this server. Use `/set-admin-channel` first.",
+				Content: "❌ No admin channel has been set for this server. Please configure it using the ADMIN_CHANNELS environment variable.",
 				Flags:   discordgo.MessageFlagsEphemeral,
 			},
 		})

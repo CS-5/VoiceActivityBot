@@ -74,7 +74,7 @@ Optional environment variables:
   - Example: `PERSISTENCE_FILE=/data/subscriptions.json ./VoiceActivityBot`
 - `ADMIN_CHANNELS` (optional): Pre-configure admin channels for guilds (format: `guildID:channelID,guildID:channelID`)
   - Example: `ADMIN_CHANNELS=123456789:987654321,111222333:444555666`
-  - Admin channels can also be set using the `/set-admin-channel` command
+  - This is the **only** way to configure admin channels
 
 ## Usage
 
@@ -113,11 +113,9 @@ Use the `/unsubscribe` command to stop receiving notifications:
 
 Server administrators can set up an admin channel for centralized subscription management:
 
-#### Set Admin Channel:
-```
-/set-admin-channel
-```
-Run this command in the channel you want to designate as the admin channel. Requires Administrator permission.
+### Admin Channel Management
+
+Server administrators must configure admin channels using the `ADMIN_CHANNELS` environment variable before starting the bot.
 
 #### List All Subscriptions:
 ```
@@ -125,11 +123,12 @@ Run this command in the channel you want to designate as the admin channel. Requ
 ```
 This command can only be used in the designated admin channel. It displays a rich interactive embed showing all active voice channel subscriptions across the server. Features:
 - View all subscriptions organized by voice channel
-- Click buttons to quickly remove individual subscriptions
+- Select a voice channel from the dropdown to manage its subscriptions
+- Remove specific subscriptions with numbered buttons
 - Beautiful embed formatting with Discord's native design
-- Shows which text channels receive notifications for each voice channel
+- Navigate back to overview with the Back button
 
-**Note:** The `/list-subscriptions` command only appears in the admin channel for cleaner command lists in other channels.
+**Note:** The `/list-subscriptions` command only works in channels configured as admin channels via the `ADMIN_CHANNELS` environment variable.
 
 ### How it works
 
