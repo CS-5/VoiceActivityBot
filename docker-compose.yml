@@ -1,6 +1,6 @@
 services:
   voiceactivitybot:
-    # image: todo vab:latest
+    image: ghcr.io/cs-5/voiceactivitybot:latest
     restart: unless-stopped
     
     environment:
