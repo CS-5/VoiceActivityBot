@@ -151,16 +151,61 @@ All subscriptions are automatically saved to a JSON file and restored when the b
 
 ## Docker Usage
 
-The bot is designed to work well in Docker containers:
+The bot is designed to work well in Docker containers with a secure, distroless image.
 
+### Quick Start with Docker Compose
+
+1. Copy the example environment file:
+```bash
+cp .env.example .env
+```
+
+2. Edit `.env` and add your Discord bot token:
+```bash
+DISCORD_TOKEN=your_discord_bot_token_here
+```
+
+3. Start the bot:
+```bash
+docker-compose up -d
+```
+
+4. View logs:
+```bash
+docker-compose logs -f
+```
+
+5. Stop the bot:
+```bash
+docker-compose down
+```
+
+### Manual Docker Build and Run
+
+Build the image:
+```bash
+docker build -t voiceactivitybot .
+```
+
+Run the container:
 ```bash
 docker run -d \
+  --name voiceactivitybot \
   -e DISCORD_TOKEN="your-bot-token" \
   -e DEBOUNCE_INTERVAL="3s" \
-  -v /path/on/host:/data \
+  -v $(pwd)/data:/data \
   -e PERSISTENCE_FILE="/data/subscriptions.json" \
-  your-bot-image
+  --restart unless-stopped \
+  voiceactivitybot
 ```
+
+### Docker Image Features
+
+- **Multi-stage build**: Alpine-based builder for minimal image size
+- **Distroless final image**: Minimal attack surface, no shell or package manager
+- **Non-root user**: Runs as uid 65532 (nonroot) for enhanced security
+- **Read-only filesystem**: Container filesystem is read-only except for mounted volumes
+- **Volume persistence**: Data persists across container restarts when using volumes
 
 This mounts a volume to persist subscriptions across container restarts.
 
