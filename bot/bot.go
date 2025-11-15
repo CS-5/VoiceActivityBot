@@ -203,6 +203,10 @@ func (b *Bot) interactionCreate(s *discordgo.Session, i *discordgo.InteractionCr
 				b.handleChannelSelect(s, i)
 			case "unsubscribe_channel_select":
 				b.handleUnsubscribeChannelSelect(s, i)
+			case "manage_subscription_select":
+				b.handleManageSubscriptionSelect(s, i)
+			case "back_to_subscription_list":
+				b.handleBackToSubscriptionList(s, i)
 			}
 		}
 	}
@@ -550,10 +554,9 @@ func (b *Bot) handleListSubscriptions(s *discordgo.Session, i *discordgo.Interac
 		return
 	}
 
-	// Build embed fields
+	// Build embed fields and select menu options
 	var fields []*discordgo.MessageEmbedField
-	var components []discordgo.MessageComponent
-	var buttons []discordgo.MessageComponent
+	var selectOptions []discordgo.SelectMenuOption
 
 	count := 0
 	for voiceChannelID, subs := range b.subscriptions {
@@ -572,30 +575,28 @@ func (b *Bot) handleListSubscriptions(s *discordgo.Session, i *discordgo.Interac
 		voiceChannelName := b.getChannelName(s, voiceChannelID)
 		var notifyChannels string
 		for _, sub := range guildSubs {
-			notifyChannels += fmt.Sprintf("<#%s>\n", sub.TextChannelId)
+			notifyChannels += fmt.Sprintf("→ <#%s>\n", sub.TextChannelId)
 			count++
-
-			// Add a button for each subscription (limit to 25 total buttons across 5 action rows)
-			if len(buttons) < 25 {
-				buttonLabel := fmt.Sprintf("Remove: %s", voiceChannelName)
-				if len(buttonLabel) > 80 {
-					buttonLabel = buttonLabel[:77] + "..."
-				}
-
-				button := discordgo.Button{
-					Label:    buttonLabel,
-					Style:    discordgo.DangerButton,
-					CustomID: fmt.Sprintf("remove_sub:%s:%s", voiceChannelID, sub.TextChannelId),
-				}
-				buttons = append(buttons, button)
-			}
 		}
 
 		fields = append(fields, &discordgo.MessageEmbedField{
 			Name:   fmt.Sprintf("🔊 %s", voiceChannelName),
 			Value:  notifyChannels,
-			Inline: false,
+			Inline: true,
 		})
+
+		// Add to select menu (limit 25 options)
+		if len(selectOptions) < 25 {
+			description := fmt.Sprintf("%d subscription(s)", len(guildSubs))
+			selectOptions = append(selectOptions, discordgo.SelectMenuOption{
+				Label:       voiceChannelName,
+				Value:       voiceChannelID,
+				Description: description,
+				Emoji: &discordgo.ComponentEmoji{
+					Name: "🔊",
+				},
+			})
+		}
 	}
 
 	if count == 0 {
@@ -608,7 +609,109 @@ func (b *Bot) handleListSubscriptions(s *discordgo.Session, i *discordgo.Interac
 		return
 	}
 
-	// Organize buttons into action rows (max 5 buttons per row, max 5 rows)
+	// Create components with select menu
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					CustomID:    "manage_subscription_select",
+					Placeholder: "Select a voice channel to manage...",
+					Options:     selectOptions,
+				},
+			},
+		},
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "📋 Active Voice Channel Subscriptions",
+		Description: fmt.Sprintf("**Total:** %d subscription(s) across %d voice channel(s)\n\nSelect a voice channel below to view and manage its subscriptions.", count, len(selectOptions)),
+		Color:       0x5865F2, // Discord Blurple
+		Fields:      fields,
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: "Select a channel to remove specific subscriptions",
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Embeds:     []*discordgo.MessageEmbed{embed},
+			Components: components,
+		},
+	})
+}
+
+func (b *Bot) handleManageSubscriptionSelect(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	data := i.MessageComponentData()
+	guildID := i.GuildID
+
+	// Get the selected voice channel ID
+	if len(data.Values) == 0 {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content: "❌ No channel selected",
+			},
+		})
+		return
+	}
+
+	voiceChannelID := data.Values[0]
+	voiceChannelName := b.getChannelName(s, voiceChannelID)
+
+	// Get subscriptions for this voice channel
+	b.mu.RLock()
+	subs, exists := b.subscriptions[voiceChannelID]
+	b.mu.RUnlock()
+
+	if !exists {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("ℹ️ No subscriptions found for **%s**", voiceChannelName),
+			},
+		})
+		return
+	}
+
+	// Filter for this guild
+	var guildSubs []subscription
+	for _, sub := range subs {
+		if sub.GuildId == guildID {
+			guildSubs = append(guildSubs, sub)
+		}
+	}
+
+	if len(guildSubs) == 0 {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content: fmt.Sprintf("ℹ️ No subscriptions found for **%s** in this server", voiceChannelName),
+			},
+		})
+		return
+	}
+
+	// Build buttons for each subscription
+	var buttons []discordgo.MessageComponent
+	var description string
+	description = fmt.Sprintf("**Voice Channel:** 🔊 %s\n\n**Notification Channels:**\n", voiceChannelName)
+
+	for idx, sub := range guildSubs {
+		description += fmt.Sprintf("%d. <#%s>\n", idx+1, sub.TextChannelId)
+
+		// Create remove button
+		button := discordgo.Button{
+			Label:    fmt.Sprintf("Remove #%d", idx+1),
+			Style:    discordgo.DangerButton,
+			CustomID: fmt.Sprintf("remove_sub:%s:%s", voiceChannelID, sub.TextChannelId),
+		}
+		buttons = append(buttons, button)
+	}
+
+	// Organize buttons into action rows (max 5 buttons per row)
+	var components []discordgo.MessageComponent
 	for i := 0; i < len(buttons); i += 5 {
 		end := i + 5
 		if end > len(buttons) {
@@ -619,18 +722,28 @@ func (b *Bot) handleListSubscriptions(s *discordgo.Session, i *discordgo.Interac
 		})
 	}
 
+	// Add a "Back" button
+	components = append(components, discordgo.ActionsRow{
+		Components: []discordgo.MessageComponent{
+			discordgo.Button{
+				Label:    "← Back to List",
+				Style:    discordgo.SecondaryButton,
+				CustomID: "back_to_subscription_list",
+			},
+		},
+	})
+
 	embed := &discordgo.MessageEmbed{
-		Title:       "📋 Active Voice Channel Subscriptions",
-		Description: fmt.Sprintf("Total: **%d** subscription(s)\n\nClick a button below to remove a subscription.", count),
-		Color:       0x5865F2, // Discord Blurple
-		Fields:      fields,
+		Title:       "🔧 Manage Subscriptions",
+		Description: description,
+		Color:       0x5865F2,
 		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Use /subscribe and /unsubscribe commands to manage subscriptions",
+			Text: fmt.Sprintf("Managing subscriptions for voice channel: %s", voiceChannelName),
 		},
 	}
 
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Type: discordgo.InteractionResponseUpdateMessage,
 		Data: &discordgo.InteractionResponseData{
 			Embeds:     []*discordgo.MessageEmbed{embed},
 			Components: components,
@@ -680,23 +793,157 @@ func (b *Bot) handleRemoveSubscriptionButton(s *discordgo.Session, i *discordgo.
 	voiceChannelName := b.getChannelName(s, voiceChannelID)
 
 	if removed {
-		// Update the message to refresh the list
+		// Show success message with button to go back to list
+		embed := &discordgo.MessageEmbed{
+			Title:       "✅ Subscription Removed",
+			Description: fmt.Sprintf("Successfully removed subscription:\n\n🔊 **%s** → <#%s>", voiceChannelName, textChannelID),
+			Color:       0x57F287, // Green
+		}
+
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("✅ Removed subscription: **%s** → <#%s>", voiceChannelName, textChannelID),
-				Flags:   discordgo.MessageFlagsEphemeral,
+				Embeds: []*discordgo.MessageEmbed{embed},
+				Components: []discordgo.MessageComponent{
+					discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							discordgo.Button{
+								Label:    "← Back to List",
+								Style:    discordgo.PrimaryButton,
+								CustomID: "back_to_subscription_list",
+							},
+						},
+					},
+				},
 			},
 		})
 	} else {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Type: discordgo.InteractionResponseUpdateMessage,
 			Data: &discordgo.InteractionResponseData{
 				Content: fmt.Sprintf("ℹ️ Subscription not found: **%s** → <#%s>", voiceChannelName, textChannelID),
-				Flags:   discordgo.MessageFlagsEphemeral,
+				Components: []discordgo.MessageComponent{
+					discordgo.ActionsRow{
+						Components: []discordgo.MessageComponent{
+							discordgo.Button{
+								Label:    "← Back to List",
+								Style:    discordgo.SecondaryButton,
+								CustomID: "back_to_subscription_list",
+							},
+						},
+					},
+				},
+				Flags: discordgo.MessageFlagsEphemeral,
 			},
 		})
 	}
+}
+
+func (b *Bot) handleBackToSubscriptionList(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	guildID := i.GuildID
+
+	// Rebuild the subscription list view
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if len(b.subscriptions) == 0 {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content:    "ℹ️ No active subscriptions in this server",
+				Components: []discordgo.MessageComponent{},
+			},
+		})
+		return
+	}
+
+	// Build embed fields and select menu options
+	var fields []*discordgo.MessageEmbedField
+	var selectOptions []discordgo.SelectMenuOption
+
+	count := 0
+	for voiceChannelID, subs := range b.subscriptions {
+		// Filter for this guild
+		guildSubs := []subscription{}
+		for _, sub := range subs {
+			if sub.GuildId == guildID {
+				guildSubs = append(guildSubs, sub)
+			}
+		}
+
+		if len(guildSubs) == 0 {
+			continue
+		}
+
+		voiceChannelName := b.getChannelName(s, voiceChannelID)
+		var notifyChannels string
+		for _, sub := range guildSubs {
+			notifyChannels += fmt.Sprintf("→ <#%s>\n", sub.TextChannelId)
+			count++
+		}
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   fmt.Sprintf("🔊 %s", voiceChannelName),
+			Value:  notifyChannels,
+			Inline: true,
+		})
+
+		// Add to select menu (limit 25 options)
+		if len(selectOptions) < 25 {
+			description := fmt.Sprintf("%d subscription(s)", len(guildSubs))
+			selectOptions = append(selectOptions, discordgo.SelectMenuOption{
+				Label:       voiceChannelName,
+				Value:       voiceChannelID,
+				Description: description,
+				Emoji: &discordgo.ComponentEmoji{
+					Name: "🔊",
+				},
+			})
+		}
+	}
+
+	if count == 0 {
+		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseUpdateMessage,
+			Data: &discordgo.InteractionResponseData{
+				Content:    "ℹ️ No active subscriptions in this server",
+				Components: []discordgo.MessageComponent{},
+			},
+		})
+		return
+	}
+
+	// Create components with select menu
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					CustomID:    "manage_subscription_select",
+					Placeholder: "Select a voice channel to manage...",
+					Options:     selectOptions,
+				},
+			},
+		},
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "📋 Active Voice Channel Subscriptions",
+		Description: fmt.Sprintf("**Total:** %d subscription(s) across %d voice channel(s)\n\nSelect a voice channel below to view and manage its subscriptions.", count, len(selectOptions)),
+		Color:       0x5865F2, // Discord Blurple
+		Fields:      fields,
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: "Select a channel to remove specific subscriptions",
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Embeds:     []*discordgo.MessageEmbed{embed},
+			Components: components,
+		},
+	})
 }
 
 // loadPersistedData loads subscriptions and admin channels from disk
