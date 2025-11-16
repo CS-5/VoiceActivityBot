@@ -462,90 +462,20 @@ func (b *Bot) handleListSubscriptions(s *discordgo.Session, i *discordgo.Interac
 	channelID := i.ChannelID
 
 	// Check if this is the admin channel
-	b.mu.RLock()
-	adminChannelID, hasAdminChannel := b.adminChannels[guildID]
-	b.mu.RUnlock()
+	adminChannelID, isAdmin, hasAdminChannel := b.verifyAdminChannel(guildID, channelID)
 
 	if !hasAdminChannel {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "❌ No admin channel has been set for this server. Please configure it using the ADMIN_CHANNELS environment variable.",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
+		respondWithError(s, i.Interaction, "❌ No admin channel has been set for this server. Please configure it using the ADMIN_CHANNELS environment variable.")
 		return
 	}
 
-	if channelID != adminChannelID {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: fmt.Sprintf("❌ This command can only be used in the admin channel: <#%s>", adminChannelID),
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
+	if !isAdmin {
+		respondWithError(s, i.Interaction, fmt.Sprintf("❌ This command can only be used in the admin channel: <#%s>", adminChannelID))
 		return
 	}
 
-	// Build the subscription list
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	if len(b.subscriptions) == 0 {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "ℹ️ No active subscriptions in this server",
-			},
-		})
-		return
-	}
-
-	// Build embed fields and select menu options
-	var fields []*discordgo.MessageEmbedField
-	var selectOptions []discordgo.SelectMenuOption
-
-	count := 0
-	for voiceChannelID, subs := range b.subscriptions {
-		// Filter for this guild
-		guildSubs := []subscription{}
-		for _, sub := range subs {
-			if sub.GuildId == guildID {
-				guildSubs = append(guildSubs, sub)
-			}
-		}
-
-		if len(guildSubs) == 0 {
-			continue
-		}
-
-		voiceChannelName := b.getChannelName(s, voiceChannelID)
-		var notifyChannels string
-		for _, sub := range guildSubs {
-			notifyChannels += fmt.Sprintf("→ <#%s>\n", sub.TextChannelId)
-			count++
-		}
-
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   fmt.Sprintf("🔊 %s", voiceChannelName),
-			Value:  notifyChannels,
-			Inline: true,
-		})
-
-		// Add to select menu (limit 25 options)
-		if len(selectOptions) < 25 {
-			description := fmt.Sprintf("%d subscription(s)", len(guildSubs))
-			selectOptions = append(selectOptions, discordgo.SelectMenuOption{
-				Label:       voiceChannelName,
-				Value:       voiceChannelID,
-				Description: description,
-				Emoji: &discordgo.ComponentEmoji{
-					Name: "🔊",
-				},
-			})
-		}
-	}
+	// Build the subscription list embed
+	embed, components, count := b.buildSubscriptionListEmbed(s, guildID)
 
 	if count == 0 {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -555,30 +485,6 @@ func (b *Bot) handleListSubscriptions(s *discordgo.Session, i *discordgo.Interac
 			},
 		})
 		return
-	}
-
-	// Create components with select menu
-	components := []discordgo.MessageComponent{
-		discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{
-				discordgo.SelectMenu{
-					CustomID:    "manage_subscription_select",
-					Placeholder: "Select a voice channel to manage...",
-					Options:     selectOptions,
-				},
-			},
-		},
-	}
-
-	embed := &discordgo.MessageEmbed{
-		Title:       "📋 Active Voice Channel Subscriptions",
-		Description: fmt.Sprintf("**Total:** %d subscription(s) across %d voice channel(s)\n\nSelect a voice channel below to view and manage its subscriptions.", count, len(selectOptions)),
-		Color:       0x5865F2, // Discord Blurple
-		Fields:      fields,
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Select a channel to remove specific subscriptions",
-		},
-		Timestamp: time.Now().Format(time.RFC3339),
 	}
 
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -624,12 +530,7 @@ func (b *Bot) handleManageSubscriptionSelect(s *discordgo.Session, i *discordgo.
 	}
 
 	// Filter for this guild
-	var guildSubs []subscription
-	for _, sub := range subs {
-		if sub.GuildId == guildID {
-			guildSubs = append(guildSubs, sub)
-		}
-	}
+	guildSubs := filterGuildSubscriptions(subs, guildID)
 
 	if len(guildSubs) == 0 {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -720,18 +621,10 @@ func (b *Bot) handleRemoveSubscriptionButton(s *discordgo.Session, i *discordgo.
 	textChannelID := parts[2]
 
 	// Verify this is in the admin channel
-	b.mu.RLock()
-	adminChannelID, hasAdminChannel := b.adminChannels[guildID]
-	b.mu.RUnlock()
+	_, isAdmin, hasAdminChannel := b.verifyAdminChannel(guildID, i.ChannelID)
 
-	if !hasAdminChannel || i.ChannelID != adminChannelID {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseChannelMessageWithSource,
-			Data: &discordgo.InteractionResponseData{
-				Content: "❌ This action can only be performed in the admin channel",
-				Flags:   discordgo.MessageFlagsEphemeral,
-			},
-		})
+	if !hasAdminChannel || !isAdmin {
+		respondWithError(s, i.Interaction, "❌ This action can only be performed in the admin channel")
 		return
 	}
 
@@ -790,65 +683,8 @@ func (b *Bot) handleRemoveSubscriptionButton(s *discordgo.Session, i *discordgo.
 func (b *Bot) handleBackToSubscriptionList(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	guildID := i.GuildID
 
-	// Rebuild the subscription list view
-	b.mu.RLock()
-	defer b.mu.RUnlock()
-
-	if len(b.subscriptions) == 0 {
-		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-			Type: discordgo.InteractionResponseUpdateMessage,
-			Data: &discordgo.InteractionResponseData{
-				Content:    "ℹ️ No active subscriptions in this server",
-				Components: []discordgo.MessageComponent{},
-			},
-		})
-		return
-	}
-
-	// Build embed fields and select menu options
-	var fields []*discordgo.MessageEmbedField
-	var selectOptions []discordgo.SelectMenuOption
-
-	count := 0
-	for voiceChannelID, subs := range b.subscriptions {
-		// Filter for this guild
-		guildSubs := []subscription{}
-		for _, sub := range subs {
-			if sub.GuildId == guildID {
-				guildSubs = append(guildSubs, sub)
-			}
-		}
-
-		if len(guildSubs) == 0 {
-			continue
-		}
-
-		voiceChannelName := b.getChannelName(s, voiceChannelID)
-		var notifyChannels string
-		for _, sub := range guildSubs {
-			notifyChannels += fmt.Sprintf("→ <#%s>\n", sub.TextChannelId)
-			count++
-		}
-
-		fields = append(fields, &discordgo.MessageEmbedField{
-			Name:   fmt.Sprintf("🔊 %s", voiceChannelName),
-			Value:  notifyChannels,
-			Inline: true,
-		})
-
-		// Add to select menu (limit 25 options)
-		if len(selectOptions) < 25 {
-			description := fmt.Sprintf("%d subscription(s)", len(guildSubs))
-			selectOptions = append(selectOptions, discordgo.SelectMenuOption{
-				Label:       voiceChannelName,
-				Value:       voiceChannelID,
-				Description: description,
-				Emoji: &discordgo.ComponentEmoji{
-					Name: "🔊",
-				},
-			})
-		}
-	}
+	// Build the subscription list embed
+	embed, components, count := b.buildSubscriptionListEmbed(s, guildID)
 
 	if count == 0 {
 		s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -859,30 +695,6 @@ func (b *Bot) handleBackToSubscriptionList(s *discordgo.Session, i *discordgo.In
 			},
 		})
 		return
-	}
-
-	// Create components with select menu
-	components := []discordgo.MessageComponent{
-		discordgo.ActionsRow{
-			Components: []discordgo.MessageComponent{
-				discordgo.SelectMenu{
-					CustomID:    "manage_subscription_select",
-					Placeholder: "Select a voice channel to manage...",
-					Options:     selectOptions,
-				},
-			},
-		},
-	}
-
-	embed := &discordgo.MessageEmbed{
-		Title:       "📋 Active Voice Channel Subscriptions",
-		Description: fmt.Sprintf("**Total:** %d subscription(s) across %d voice channel(s)\n\nSelect a voice channel below to view and manage its subscriptions.", count, len(selectOptions)),
-		Color:       0x5865F2, // Discord Blurple
-		Fields:      fields,
-		Footer: &discordgo.MessageEmbedFooter{
-			Text: "Select a channel to remove specific subscriptions",
-		},
-		Timestamp: time.Now().Format(time.RFC3339),
 	}
 
 	s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
@@ -1008,9 +820,8 @@ func (b *Bot) removeSubscription(voiceChannelID, textChannelID string) bool {
 			}
 
 			// Save to persistence asynchronously (non-blocking)
-			b.mu.Unlock()
+			// No need to unlock/relock - savePersistedDataAsync is non-blocking
 			b.savePersistedDataAsync()
-			b.mu.Lock()
 
 			return true
 		}
@@ -1025,6 +836,117 @@ func (b *Bot) getChannelName(s *discordgo.Session, channelID string) string {
 		return channel.Name
 	}
 	return channelID
+}
+
+// getUsername returns the user's display name (nickname if available, otherwise username)
+func getUsername(member *discordgo.Member) string {
+	if member.Nick != "" {
+		return member.Nick
+	}
+	return member.User.Username
+}
+
+// filterGuildSubscriptions returns subscriptions for a specific guild
+func filterGuildSubscriptions(subs []subscription, guildID string) []subscription {
+	var filtered []subscription
+	for _, sub := range subs {
+		if sub.GuildId == guildID {
+			filtered = append(filtered, sub)
+		}
+	}
+	return filtered
+}
+
+// respondWithError sends an ephemeral error response
+func respondWithError(s *discordgo.Session, i *discordgo.Interaction, message string) error {
+	return s.InteractionRespond(i, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{
+			Content: message,
+			Flags:   discordgo.MessageFlagsEphemeral,
+		},
+	})
+}
+
+// buildSubscriptionListEmbed builds the subscription list embed and components for a guild
+func (b *Bot) buildSubscriptionListEmbed(s *discordgo.Session, guildID string) (*discordgo.MessageEmbed, []discordgo.MessageComponent, int) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	var fields []*discordgo.MessageEmbedField
+	var selectOptions []discordgo.SelectMenuOption
+	count := 0
+
+	for voiceChannelID, subs := range b.subscriptions {
+		guildSubs := filterGuildSubscriptions(subs, guildID)
+		if len(guildSubs) == 0 {
+			continue
+		}
+
+		voiceChannelName := b.getChannelName(s, voiceChannelID)
+		var notifyChannels string
+		for _, sub := range guildSubs {
+			notifyChannels += fmt.Sprintf("→ <#%s>\n", sub.TextChannelId)
+			count++
+		}
+
+		fields = append(fields, &discordgo.MessageEmbedField{
+			Name:   fmt.Sprintf("🔊 %s", voiceChannelName),
+			Value:  notifyChannels,
+			Inline: true,
+		})
+
+		// Add to select menu (limit 25 options)
+		if len(selectOptions) < 25 {
+			description := fmt.Sprintf("%d subscription(s)", len(guildSubs))
+			selectOptions = append(selectOptions, discordgo.SelectMenuOption{
+				Label:       voiceChannelName,
+				Value:       voiceChannelID,
+				Description: description,
+				Emoji: &discordgo.ComponentEmoji{
+					Name: "🔊",
+				},
+			})
+		}
+	}
+
+	embed := &discordgo.MessageEmbed{
+		Title:       "📋 Active Voice Channel Subscriptions",
+		Description: fmt.Sprintf("**Total:** %d subscription(s) across %d voice channel(s)\n\nSelect a voice channel below to view and manage its subscriptions.", count, len(selectOptions)),
+		Color:       0x5865F2, // Discord Blurple
+		Fields:      fields,
+		Footer: &discordgo.MessageEmbedFooter{
+			Text: "Select a channel to remove specific subscriptions",
+		},
+		Timestamp: time.Now().Format(time.RFC3339),
+	}
+
+	components := []discordgo.MessageComponent{
+		discordgo.ActionsRow{
+			Components: []discordgo.MessageComponent{
+				discordgo.SelectMenu{
+					CustomID:    "manage_subscription_select",
+					Placeholder: "Select a voice channel to manage...",
+					Options:     selectOptions,
+				},
+			},
+		},
+	}
+
+	return embed, components, count
+}
+
+// verifyAdminChannel checks if the interaction is in the admin channel for the guild
+func (b *Bot) verifyAdminChannel(guildID, channelID string) (adminChannelID string, isAdmin bool, hasAdminChannel bool) {
+	b.mu.RLock()
+	adminChannelID, hasAdminChannel = b.adminChannels[guildID]
+	b.mu.RUnlock()
+
+	if !hasAdminChannel {
+		return "", false, false
+	}
+
+	return adminChannelID, channelID == adminChannelID, true
 }
 
 // formatSubscribeResponse generates the response message for subscribe operations
@@ -1065,10 +987,7 @@ func (b *Bot) voiceStateUpdate(s *discordgo.Session, vsu *discordgo.VoiceStateUp
 		return
 	}
 
-	username := member.User.Username
-	if member.Nick != "" {
-		username = member.Nick
-	}
+	username := getUsername(member)
 
 	// Detect when user joins a voice channel
 	var joinedChannelID string
